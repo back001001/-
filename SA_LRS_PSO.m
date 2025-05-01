@@ -2,12 +2,12 @@
 % 作者: Back0077
 
 % 清空工作空间和命令窗
-clear; clc;
+%clear; clc;
 
 %% 参数设置
 Nu = 3;   % 无人机数量
 Nt = 10;  % 目标数量
-MaxIter = 1000;   % 最大迭代次数
+MaxIter = 2000;   % 最大迭代次数
 PopSize = 50;   % 种群规模
 b1 = 0.5;   % 机会损失因子 - 提前到达目标的惩罚系数
 b2 = 0.5;   % 延迟惩罚因子 - 超过时间窗口的惩罚系数
@@ -143,10 +143,7 @@ for iter = 1:MaxIter
     % 记录当前迭代的最优解
     PSO_Cost(iter) = GlobalBest.Cost;
     
-    % 每10次迭代输出一次进度信息
-    if mod(iter,1) == 0
         fprintf('迭代 %d, 温度 %.6f, 最优成本: %.2f\n', iter, T_SA, GlobalBest.Cost);
-    end
 end
 
 %% 输出最终结果
@@ -157,50 +154,11 @@ for i = 1:Nu
     disp(finalPaths{i});
 end
 fprintf('总成本: %.2f\n', GlobalBest.Cost);
-
-%% 保存结果
-save('salrspso_results.mat', 'PSO_Cost', 'finalPaths', 'GlobalBest');
-
 %% 绘制收敛曲线
-figure;
-plot(1:MaxIter, PSO_Cost, 'b-');
-title('PSO-SA-LRS算法收敛曲线');
-xlabel('迭代次数');
-ylabel('目标函数值');
-grid on;
+ 
 
-%% 绘制任务分配方案
-figure;
-hold on;
-% 绘制无人机基地位置
-plot(UAVs(:,2), UAVs(:,3), 'k^', 'MarkerSize', 10, 'LineWidth', 2);
-% 绘制目标位置
-plot(Targets(:,2), Targets(:,3), 'ro', 'MarkerSize', 8);
-% 绘制任务分配路线
-colors = {'b-', 'g-', 'r-', 'm-', 'c-'};
-for i = 1:Nu
-    path = finalPaths{i};
-    if ~isempty(path)
-        % 绘制从基地到第一个目标的路线
-        plot([UAVs(i,2), Targets(path(1),2)], [UAVs(i,3), Targets(path(1),3)], ...
-            colors{mod(i-1,length(colors))+1}, 'LineWidth', 1.5);
-        % 绘制目标之间的路线
-        for j = 1:length(path)-1
-            plot([Targets(path(j),2), Targets(path(j+1),2)], ...
-                [Targets(path(j),3), Targets(path(j+1),3)], ...
-                colors{mod(i-1,length(colors))+1}, 'LineWidth', 1.5);
-        end
-        % 绘制从最后一个目标返回基地的路线
-        plot([Targets(path(end),2), UAVs(i,2)], [Targets(path(end),3), UAVs(i,3)], ...
-            colors{mod(i-1,length(colors))+1}, 'LineWidth', 1.5);
-    end
-end
-legend('UAV Bases', 'Targets', 'Location', 'best');
-title('Final Task Assignment');
-xlabel('X coordinate');
-ylabel('Y coordinate');
-grid on;
-hold off;
+
+
 
 %% 辅助函数
 % DecodeParticle - 解码粒子位置为任务分配方案
@@ -302,7 +260,7 @@ end
 function [UAVPaths, isValid] = RepairSolution(UAVPaths, UAVs, Targets)
     Nu = size(UAVs, 1);
     Nt = size(Targets, 1);
-    maxAttempts = 5;
+    maxAttempts = 10;
     isValid = false;
     
     for attempt = 1:maxAttempts
@@ -376,23 +334,31 @@ function [UAVPaths, isValid] = RepairSolution(UAVPaths, UAVs, Targets)
         [hasDeadlock, strongComponents] = DetectDeadlock(UAVPaths, Targets);
         if hasDeadlock
             UAVPaths = ResolveDeadlock(UAVPaths, strongComponents);
-            continue;
+            % 修复后立即重新验证
+            if CheckConstraints(UAVPaths, UAVs, Targets)
+                isValid = true;
+                break;
+            end
         end
-
-        % 验证约束条件
+        
+        % 5. 若仍无效，随机调整部分路径
+        if ~isValid && attempt > maxAttempts/2
+            for i = 1:Nu
+                if ~isempty(UAVPaths{i})
+                    % 随机重排当前无人机的任务
+                    UAVPaths{i} = UAVPaths{i}(randperm(length(UAVPaths{i})));
+                end
+            end
+        end
+        
+        % --- 最终验证 ---
         if CheckConstraints(UAVPaths, UAVs, Targets)
             isValid = true;
             break;
         end
-        
-        % 如果没有修改且方案无效，随机重新分配
-        if ~modified
-            for i = 1:Nu
-                UAVPaths{i} = [];
-            end
-        end
     end
 end
+
 
 % 验证约束条件
 function valid = CheckConstraints(UAVPaths, UAVs, Targets)
@@ -425,8 +391,17 @@ function valid = CheckConstraints(UAVPaths, UAVs, Targets)
         end
     end
     
-    % 3. 验证每个任务的分配数量是否正确
-    valid = all(taskCounts == [Targets(:,8)]');
+    % 3. 验证任务分配数量是否正确
+    if ~all(taskCounts == [Targets(:,8)]')
+        valid = false;
+        return;
+    end
+    
+    % 4. 新增：检测死锁
+    [hasDeadlock, ~] = DetectDeadlock(UAVPaths, Targets);
+    if hasDeadlock
+        valid = false;
+    end
 end
 
 % 局部随机搜索
@@ -737,18 +712,21 @@ end
 function UAVPaths = ResolveDeadlock(UAVPaths, strongComponents)
     for comp = strongComponents
         component = comp{1};
-        % 遍历每个无人机的路径
         for i = 1:length(UAVPaths)
             path = UAVPaths{i};
-            if ~isempty(path)
-                % 找到属于当前强连通分量的任务
-                indices = find(ismember(path, component));
-                if length(indices) > 1
-                    % 通过反转任务顺序来打破循环
-                    path(indices) = fliplr(path(indices));
-                    UAVPaths{i} = path;
+            indices = find(ismember(path, component));
+            if ~isempty(indices)
+                % 策略1：反转任务顺序
+                path(indices) = fliplr(path(indices));
+                % 策略2：随机交换任务
+                if length(indices) >= 2 && rand() > 0.5
+                    swapIdx = randperm(length(indices), 2);
+                    path(indices(swapIdx)) = path(indices(fliplr(swapIdx)));
                 end
+                UAVPaths{i} = path;
             end
         end
     end
 end
+%% 保存收敛数据及任务分配结果
+save('SA_LRS_PSO_Data.mat', 'PSO_Cost', 'MaxIter', 'finalPaths', 'UAVs', 'Targets');
